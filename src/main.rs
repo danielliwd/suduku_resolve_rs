@@ -2,20 +2,20 @@
 use log::{info, trace};
 use anyhow::{Result};
 
-use suduku_resolve::Suduku;
+use sudoku_resolve::Sudoku;
 
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     env_logger::init();
 
-    //let mut suduku = Suduku::load_from_file("suduku.txt")?;
+    let mut sudoku = Sudoku::load_from_file("suduku.txt")?;
 
-    // println!("{}",suduku.to_string()?);
+    println!("{}",sudoku.to_string());
 
-    // let result = suduku.resolv();
-    // println!("resolved? {:?}\n", result);
+    let result = sudoku.resolv();
+    println!("resolved? {:?}\n", result);
 
-    // println!("{}",suduku.to_string()?);
+    println!("{}",sudoku.to_string());
 
     Ok(())
 }

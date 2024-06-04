@@ -1,46 +1,45 @@
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, Context};
+use std::mem;
 
 #[allow(unused_imports)]
 use std::io::prelude::*;
 use std::io::{BufWriter, Write, BufReader, Read};
 use std::cmp::Reverse;
+use bitmaps::Bitmap;
 
 #[allow(unused_imports)]
 use log::{info, trace};
 
-use bitmaps::Bitmap;
+type Board = [[u8;9];9];
+type Cell = (usize,usize);
 
-fn get_candidates(b: Bitmap<10>) -> Vec<u8>{
-    let mut candidates = Vec::with_capacity(9);
+// get bits in bitmap
+#[inline(always)]
+fn get_bits(b: Bitmap<10>) -> Vec<u8>{
+    let mut bits = Vec::with_capacity(9);
     let mut from_idx = 0;
     loop{
         if let Some(index) = b.next_index(from_idx){
             from_idx = index;
-            candidates.push(index as u8);
+            bits.push(index as u8);
         } else{
             break;
         }
 
     }
-    candidates
+    bits
 }
 
-pub fn argsort<T: Ord>(data: &[T]) -> Vec<usize> {
-    let mut indices = (0..data.len()).collect::<Vec<_>>();
-    // sort_unstable_by_key is faster than sort_by_key
-    indices.sort_unstable_by_key(|&i| Reverse(&data[i]));
-    indices
-}
+/// 行、列的填充状态, 某数字被填充，则 get(n) == true
+/// bitmap可以进行位运算, 比较方便
+type FilledState = [Bitmap<10>;9];
+type Candidates = [[Bitmap<10>;9];9];
 
-type Board = Vec<Vec<u8>>;
-type Cell = (usize, usize);
-type FilledState = Vec<Bitmap<10>>;
-pub enum CombType{
-    Row,
-    Col,
-}
-pub struct SudukuState{
+#[derive(Clone, Copy)]
+pub struct SudokuState{
+    /// 空格数量
+    blank_counts: u8,
     /// 行填充状态 rows_filled_state[0].get(9) == true 表示 第零行9已被填充
     rows_filled_state: FilledState,
     /// 列填充状态 cols_filled_state[1].get(8) == true 表示 第一列8已被填充
@@ -48,388 +47,161 @@ pub struct SudukuState{
     /// 9 x 九宫格填充状态 grids_filled_state[3].get(7) == true 表示 第三宫格7已被填充
     grids_filled_state: FilledState,
    
-    // 侯选数字 candidates[1][2] 表示第1行第2列的侯选数字列表
-    // 数字0~9 共10个
-    candidates: Vec<Vec<Bitmap<10>>>,
-
+    /// 侯选
+    /// 侯选数字 candidates[1][2] 表示第1行第2列的侯选数字列表
+    /// 数字0~9 共10个
+    /// if candidates[1][2].get(3) == true, 表示3是(1,2)这个cell的侯选
+    candidates: Candidates,
 }
 
-pub struct Suduku{
-    data: Board,
-    state: SudukuState,
+#[derive(Clone, Copy)]
+pub struct Sudoku{
+    board: Board,
+    state: SudokuState,
 }
 
-impl Default for SudukuState{
-    fn default() -> Self{
-        fn new_filled_state()-> FilledState{
-            let mut tpl = Bitmap::<10>::mask(1);
-            let tpl = tpl.as_value();
 
-            vec![
-                Bitmap::<10>::from_value(*tpl),
-                Bitmap::<10>::from_value(*tpl),
-                Bitmap::<10>::from_value(*tpl),
-
-                Bitmap::<10>::from_value(*tpl),
-                Bitmap::<10>::from_value(*tpl),
-                Bitmap::<10>::from_value(*tpl),
-
-                Bitmap::<10>::from_value(*tpl),
-                Bitmap::<10>::from_value(*tpl),
-                Bitmap::<10>::from_value(*tpl),
-            ]
-        }
-
-        let mut candidates_tpl = Bitmap::<10>::mask(10);
-        candidates_tpl.set(0, false);
-        let candidates_tpl = candidates_tpl.as_value();
-
-        let mut candidates = Vec::with_capacity(9);
-        for i in 0..9{
-            let mut row = Vec::with_capacity(9);
-            for j in 0..9{
-                    row.push(Bitmap::<10>::from_value(*candidates_tpl));
-            }
-            candidates.push(row);
-        }
-        SudukuState{
-            rows_filled_state: new_filled_state(),
-            cols_filled_state: new_filled_state(),
-            grids_filled_state: new_filled_state(),
-            candidates,
+const N: usize=9;
+impl Sudoku {
+    fn create()-> Sudoku{
+        Sudoku{
+            board: [[0;N];N],
+            state: SudokuState::default(),
         }
     }
-}
 
-impl SudukuState{
-    fn fill(&mut self, pos: Cell, n: u8)-> Result<()>{
-        assert!(n > 0 && n < 10);
-
-        let (r,c) = pos;
-        assert!(r < 9 && c < 9);
-
-        let n = n as usize;
-
-        if self.rows_filled_state[r].set(n, true) {
-            return Err(anyhow!("conflict"))
+    fn from_bytes(data: &[u8])-> Sudoku{
+        assert!(data.len() >= N*N);
+        let mut sudoku = Self::create();
+        // row
+        let mut row=0;
+        // col
+        let mut col=0;
+        for num in data.iter().take(N*N){
+            if *num != 0 {
+                sudoku.board[row][col] = *num;
+            }
+            col+=1;
+            if col>=9{
+                row+=1;
+                col=0;
+            }
+            if row >= 9 {
+                break;
+            }
         }
+        sudoku
+    }
+    pub fn load_from_buffer(buf: &[u8]) -> Result<Sudoku>{
+        let mut data = [0u8;N*N];
+        let mut idx = 0;
 
-        if self.cols_filled_state[c].set(n, true){
-            return Err(anyhow!("conflict"))
+        for c in buf{
+            if idx > N*N {
+                break;
+            }
+            if *c >= b'0' && *c <= b'9' {
+                data[idx] = *c - b'0';
+                idx+=1;
+            }
         }
+        Ok(Self::from_bytes(&data[..]))
+    }
+    pub fn load(mut reader: impl std::io::Read) -> Result<Sudoku>{
+        let mut buf = Vec::with_capacity(1024);
+        reader.read_to_end(&mut buf).map(|i|i as u8 -b'0').unwrap();
+        Self::load_from_buffer(&buf[..])
+    }
 
-        let grid = (r / 3) * 3 +  (c / 3);
-        if self.grids_filled_state[grid].set(n, true){
-            return Err(anyhow!("conflict"))
-        }
+    pub fn load_from_file(file: &str) -> Result<Sudoku>{
+        Self::load(std::fs::File::open(file)?)
+    }
 
-        // remove candidates
-        self.candidates[r][c] &= Bitmap::new();
+    fn init_state(&mut self) -> Result<()>{
         for i in 0..9{
-            // 行
-            self.candidates[r][i].set(n, false);
-            // 列
-            self.candidates[i][c].set(n, false);
-            // 宫格
-            let gr = r - r%3 + i / 3 ;
-            let gc = c - c % 3 + i % 3;
-            self.candidates[gr][gc].set(n, false);
+            for j in 0..9{
+                let n = self.board[i][j];
+                if n != 0{
+                    if let Err(err) = self.state.fill((i,j), n) {
+                        return Err(err);
+                    }
+                }
+            }
         }
         Ok(())
     }
 
-    fn candidates_eliminate(&mut self, cell: Cell, n: u8) -> bool{
-        self.candidates[cell.0][cell.1].set(n as usize, false)
+    fn fill(&mut self, pos: Cell, n: u8)-> Result<()>{
+        self.board[pos.0][pos.1] = n;
+        self.state.fill(pos, n)
     }
 
-    fn get_candidates(&self, pos:Cell) -> Vec<u8>{
-       get_candidates(self.candidates[pos.0][pos.1])
+    /// 一轮次的拟人聪明解法
+    pub fn resolv_inner_smart_once(&mut self)-> Result<bool>{
+        // 只要还有单一侯选，则一直填充
+        while self.resolv_inner_fill_only_one()? > 0{
+        };
+
+        //println!("has no only one:\n{}", self.to_string());
+        // 当唯一侯选都填充完毕，则进行一次宫格直线的侯选消除, 消除后再检查填充唯一侯选
+        let counter = self.state.line_candidates_eliminate()?;
+        //println!("line candidates_eliminate counts: {}", counter);
+
+        Ok(counter > 0)
     }
-    /// 消除术，宫格条式消除
-    /// 当宫格内行或列的candidates， 不在其他行或列里, 则对应的整行或整列非本宫格,应消除这些candidates
-    /// 比如 (0,1) (0,2) 共同candidates 是 [2,3], 且在 (1,0) (1,1) (1,2) (2,0) (2,1) (2, 2)中都没有2,3. 则应该消除 (0,p) p=3,4,5,6,7,9的candidates中的[2,3]
-    fn grid_line_candidates_eliminate(&mut self) -> usize{
-        let mut counter = 0;
-        for i in 0..9{
-            for (cell1, cell2, n) in self.find_grid_line_combose(i){
-                //println!("grid_line_combose {:?}{:?} with {}", cell1, cell2, n);
-                if cell1.0 == cell2.0{
-                    // remove row
-                    for col in 0..9{
-                        if col / 3 != cell1.1/3{
-                            //println!("grid_line_combose eliminate ({},{})", cell1.0, col);
-                            let old = self.candidates_eliminate((cell1.0, col), n);
-                            if old == true{
-                                counter+=1;
-                            }
-                        }
-                    }
-
-                }else if cell1.1==cell2.1{
-                    // remove col
-                    for row in 0..9{
-                        if row / 3 != cell1.0/3{
-                            //println!("grid_line_combose eliminate ({},{})", row, cell1.1);
-                            let old=self.candidates_eliminate((row, cell1.1), n);
-                            if old == true{
-                                counter+=1;
-                            }
-                        }
-                    }
-
-                }
-            }
+    /// 填充只有唯一侯选的单元, 返回填充单元格数量
+    pub fn resolv_inner_fill_only_one(&mut self)->Result<usize>{
+        let result = self.state.find_only_one_candidates();
+        //println!("only candidate fill: {:?}", result);
+        for (cell, num) in &result{
+            self.fill(*cell, *num)?;
         }
-        counter
+        Ok(result.len())
     }
-
-    /// 找到某一行、列、宫格中，有唯一可填数值的单元
-    fn find_only_one_candidates(&mut self) -> Vec<(Cell, u8)> {
-        let mut result :Vec<(Cell, u8)> = Vec::new();
-        for num in 0..9{
-        //for num in 5..6
-            // 一行， 一列， 一个宫格为一组
-            for grp in 0..9{
-                //println!("num {}. group id {}", num, grp);
-            //for grp in 0..1
-                let mut row_counter = 0;
-                let mut col_counter = 0;
-                let mut grid_counter = 0;
-
-                let mut row_unit_last: Cell = (0,0);
-                let mut col_unit_last: Cell = (0,0);
-                let mut grid_unit_last: Cell = (0,0);
-                // 每组9个单元格
-                for unit in 0..9{
-                    // 行 
-                    let row_unit = self.candidates[grp][unit];
-                    let col_unit = self.candidates[unit][grp];
-                    // lefttop_cell
-                    let lt :Cell = (grp / 3 * 3, grp % 3 * 3);
-                    let gr = lt.0 + unit / 3 ;
-                    let gc = lt.1 + unit % 3;
-                    let grid_unit = self.candidates[gr][gc];
-                    //println!("({},{}): {:?}", grp, unit, get_candidates(row_unit));
-                    //println!("({},{}): {:?}", unit, grp, get_candidates(col_unit));
-                    //println!("({},{}): {:?}", gr, gc, get_candidates(grid_unit));
-
-                    if row_unit.get(num){
-                        row_counter+=1;
-                        row_unit_last = (grp, unit);
-                    }
-
-                    if col_unit.get(num){
-                        col_counter+=1;
-                        col_unit_last = (unit, grp);
-                    }
-
-                    if grid_unit.get(num){
-                        grid_counter+=1;
-                        grid_unit_last = (gr, gc);
-                    }
-
-                }
-                fn push_to_result(result: &mut Vec<(Cell, u8)>, cell: Cell, n:u8){
-                    if let None = result.iter().position(|i|i.0.0 == cell.0 && i.0.1 == cell.1 && i.1 == n) {
-                        result.push((cell, n));
-                    }
-                }
-                if row_counter==1 {
-                    push_to_result(&mut result, row_unit_last, num as u8);
-                    //println!("group id {}. result {:?}", grp, result);
-                    continue; // next grp
-                }
-                if col_counter==1 {
-                    push_to_result(&mut result, col_unit_last, num as u8);
-                    //println!("group id {}. result {:?}", grp, result);
-                    continue; // next grp
-                }
-                if grid_counter==1 {
-                    push_to_result(&mut result, grid_unit_last, num as u8);
-                    //println!("group id {}. result {:?}", grp, result);
-                    continue; // next grp
-                }
-            }
-
+    fn resolv_inner(&mut self)-> Result<()>{
+        if self.state.blank_counts == 0 {
+            return Ok(())
         }
 
-        result
-    }
-    /// 某个宫格内一行中某两个单元, 如果其共同侯选N 在宫格内其他行都不存在，则可以断定该行非宫格内的单元，不可能填入N
-    /// 列也相同
-    /// 找到宫格内这种直线组合
-    fn find_grid_line_combose(&mut self, grid_id: usize) -> Vec<(Cell, Cell, u8)>{
-        let mut result : Vec<(Cell,Cell, u8)> = Vec::new();
-        // lefttop_cell
-        let lt :Cell = (grid_id / 3 * 3, grid_id % 3 * 3);
-        // all combose
-        const ALL_COMB: &[(CombType,Cell,Cell)] = &[
-            // 行
-            (CombType::Row, (0,0), (0,1)),
-            (CombType::Row, (0,0), (0,2)),
-            (CombType::Row, (0,1), (0,2)),
+        while self.resolv_inner_smart_once().with_context(||format!("err?:\n{}", self.to_string()))? {};
 
-            (CombType::Row, (1,0), (1,1)),
-            (CombType::Row, (1,0), (1,2)),
-            (CombType::Row, (1,1), (1,2)),
-
-            (CombType::Row, (2,0), (2,1)),
-            (CombType::Row, (2,0), (2,2)),
-            (CombType::Row, (2,1), (2,2)),
-
-            // 列
-            (CombType::Col, (0,0), (1,0)),
-            (CombType::Col, (0,0), (2,0)),
-            (CombType::Col, (1,0), (2,0)),
- 
-            (CombType::Col, (0,1), (1,1)),
-            (CombType::Col, (0,1), (2,1)),
-            (CombType::Col, (1,1), (2,1)),
- 
-            (CombType::Col, (0,2), (1,2)),
-            (CombType::Col, (0,2), (2,2)),
-            (CombType::Col, (1,2), (2,2)),
-        ];
-
-        for (comb_type, p1, p2) in ALL_COMB{
-            // cell1
-            let c1 :Cell = (p1.0 + lt.0, p1.1 + lt.1);  
-            // cell2
-            let c2 :Cell = (p2.0 + lt.0, p2.1 + lt.1);  
-            let c1_can = self.candidates[c1.0][c1.1] ; 
-            let c2_can = self.candidates[c2.0][c2.1];
-            if c1_can.is_empty() || c2_can.is_empty(){
-                continue
-            }
-            //println!("combose: {:?} {:?}", c1, c2);
-
-            // combose common candidates bitmap
-            let common = c1_can & c2_can; 
-            if common.is_empty(){
-                continue;
-            }
-
-            // 对比相邻的行列
-            let mut compare_cells: Vec<Cell> = Vec::with_capacity(6);
-            match comb_type{
-                CombType::Row => {
-                    for row in 0..3{
-                        if row == c1.0 {
-                            // same row
-                            continue;
-                        }
-                        for col in 0..3{
-                            compare_cells.push((row+lt.0, col+lt.1))
-                        }
-                    }
-                },
-                CombType::Col => {
-                    for col in 0..3{
-                        if col == c1.1 {
-                            // same col
-                            continue;
-                        }
-                        for row in 0..3{
-                            compare_cells.push((row+lt.0, col+lt.1))
-                        }
-                    }
-
-                },
-            }
-
-            let mut candidates_for_elimate: Vec<u8> = Vec::with_capacity(4);
-            for element in get_candidates(common) {
-                let mut founded = true;
-                for cell in &compare_cells{
-                    let compare_cell_candidate = self.candidates[cell.0][cell.1];
-                    if compare_cell_candidate.get(element as usize){
-                        founded = false;
-                        break;
-                    }
-                }
-                if founded{
-                    result.push((c1, c2, element))
-                }
-            }
-
+        if self.state.blank_counts == 0 {
+            return Ok(())
         }
-        result
-    }
 
+        if let Some(cell) = self.state.find_empty_pos_with_less_candidates() {
+            //println!("candidate for try: {:?}", self.state.get_candidates(cell));
+            for num in self.state.get_candidates(cell){
+                let mut backup = self.clone();
+                //println!("try {:?} {}", cell, num);
+                backup.fill(cell, num);
+                if let Ok(_) = backup.resolv_inner(){
+                    mem::replace(self, backup);
+                    return Ok(())
+                } else{
+                    //println!("rollback {:?} {}", cell, num);
+                }
+            }
+        } else{
+            return Err(anyhow!("can't find empty pos."))
+        }
+
+        Err(anyhow!("can't resolv."))
+    }
+    pub fn resolv(&mut self)-> Result<()>{
+        self.init_state();
+        self.resolv_inner()?;
+
+        Ok(())
+    }
 }
 
-impl Suduku{
-    pub fn new() -> Self{
-        Suduku{
-            data: vec![vec![0; 9]; 9], 
-            state: SudukuState::default(),
-        }
-    }
-
-    /// create a Suduku object by given `Board` data
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - suduku Board data
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use suduku_resolve::Suduku;
-    /// let mut suduku = Suduku::create(vec![
-    ///     vec![9,6,0, 0,3,0,  0,0,0],
-    ///     vec![0,0,0, 8,0,0,  0,5,0],
-    ///     vec![0,7,0, 0,0,0,  0,0,0],
-    ///
-    ///     vec![4,0,5, 0,0,0,  9,0,0],
-    ///     vec![2,0,0, 0,0,0,  3,0,0],
-    ///     vec![0,0,0, 7,0,0,  0,0,0],
-    ///
-    ///     vec![0,0,0, 5,0,0,  0,8,7],
-    ///     vec![0,0,0, 0,9,6,  0,0,0],
-    ///     vec![0,0,0, 0,0,0,  0,0,0],
-    /// ]);
-    /// ```
-    ///
-    pub fn create(data: Board) -> Self{
-        Suduku{
-            data,
-            state: SudukuState::default(),
-        }
-    }
-
-    pub fn load_from_file(file: &str) -> Result<Suduku>{
-        Self::load_from(std::fs::File::open(file)?)
-    }
-
-    pub fn load_from_buffer(buf: &[u8]) -> Result<Suduku>{
-        let mut data: Vec<u8> = Vec::with_capacity(9*9);
-        for c in buf{
-            if *c >= b'0' && *c <= b'9' {
-                data.push(*c - b'0')
-            }
-        }
-        if data.len() < 9*9{
-            return Err(anyhow!("data length is not enough"));
-        }
-
-        data.truncate(9*9);
-        let chunks: Vec<Vec<u8>> = data.chunks(9).map(|chunk| chunk.to_vec()).collect();
-        Ok(Suduku::create(chunks))
-    }
-
-    pub fn load_from(mut reader: impl std::io::Read) -> Result<Suduku>{
-        let mut buf = Vec::with_capacity(1024);
-        reader.read_to_end(&mut buf).unwrap();
-        return Self::load_from_buffer(&buf[..])
-    }
-
-
-    pub fn to_string(&self) -> Result<String>{
-        let mut bufwriter = BufWriter::new(Vec::with_capacity((9*4 as usize).pow(2)));
+impl ToString for Sudoku{
+    fn to_string(&self) -> String{
+        let mut bufwriter = BufWriter::new(Vec::with_capacity((N*4 as usize).pow(2)));
         for i in 0..9{
             for j in 0..9{
-                let n = self.data[i][j];
+                let n = self.board[i][j];
                 bufwriter.write(&[n + b'0', b' ']).unwrap();
                 if j%3==2{
                     bufwriter.write(&[b' ']).unwrap();
@@ -441,163 +213,377 @@ impl Suduku{
             }
         }
 
-        Ok(String::from_utf8(bufwriter.into_inner()?)?)
-    }
-    pub fn resolv(&mut self)-> Result<()>{
-        self.init_state();
-
-        loop{
-            loop {
-                // 不断填充只有唯一侯选的单元
-                let result = self.state.find_only_one_candidates();
-                // println!("result: {:?}", result);
-                for (cell, num) in &result{
-                    let result = self.fill(*cell, *num);
-                    // println!("fill result: {:?}", result);
-                }
-                // println!("suduku:\n{}", suduku.to_string().unwrap());
-                if result.len() == 0{
-                    break;
-                }
-            }
-
-            // 当唯一侯选都填充完毕，则进行一次宫格直线的侯选消除, 消除后再检查填充唯一侯选
-            let n = self.state.grid_line_candidates_eliminate();
-            // println!("suduku:\n{}", suduku.to_string().unwrap());
-            if n == 0{
-                break;
-            }
-        }
-
-        let mut num_counter_vec = Self::static_data(&self.data);
-        let n_order = argsort(&num_counter_vec[..])
-            .into_iter()
-            .filter(|i|*i!=0)
-            .map(|i|i as u8)
-            .collect();
-        println!("n_order: {:?}", n_order);
-
-        Self::resolv_inner(&mut self.data, (0,0), 0, &n_order)
-    }
-    fn static_data(data: &Board)-> Vec<u8>{
-        let mut num_counter_vec = vec![0;10];
-        for i in 0..9{
-        for j in 0..9{
-            let n: usize = data[i][j].into();
-            if n!=0 {
-                num_counter_vec[n] += 1;
-            }
-
-        }
-        }
-    
-        num_counter_vec
-
-    }
-
-    fn resolv_inner(board: &mut Board, pos: Cell, level: usize, n_order: &Vec<u8>) -> Result<()> {
-        fn conflict_with(board: &Board, pos: Cell, val: u8) -> bool{
-
-            // 冲突检查
-            for i in 0..9 {
-
-                // 九宫格pos
-                let posx: Cell= (pos.0 - pos.0 % 3 + i / 3, pos.1 - pos.1 % 3 + i % 3);
-
-                if 
-                // 行
-                board[pos.0][i] == val || 
-                // 列
-                board[i][pos.1] == val ||
-                // 九宫格
-                board[posx.0][posx.1] == val
-                {
-                    return true
-                }
-
-            }
-
-            false
-        }
-
-        fn find_next_empty_pos(board: &Board, pos: Cell) -> Option<Cell> {
-
-            let (mut i,mut j) = pos;
-            loop {
-                if i >= 9 {
-                    break;
-                }
-                if j >= 9 {
-                    i+=1;
-                    j=0;
-                    continue;
-                }
-
-                if board[i][j] == 0 {
-                    return Some((i,j))
-                }
-
-                j+=1;
-
-
-            }
-
-            None
-        }
-
-        loop{
-
-            if let Some(next_pos) = find_next_empty_pos(board, pos){
-                //for n in 1..=9{
-                for n in &vec![5u8, 7, 9, 3, 6, 8, 2, 4, 1]{
-                //for n in n_order{
-                    if conflict_with(board, next_pos, *n){
-                        continue
-                    }
-                    // if not conflict, fill n to board
-                    trace!("{: <3$}{:?} try: {}","", next_pos, *n, level*2 );
-                    board[next_pos.0][next_pos.1] = *n ;
-                    if let Ok(result) = Self::resolv_inner(board, next_pos, level+1, n_order){
-                        return Ok(result)
-                    }else{
-                        // recover and continue the next try
-                        trace!("{: <2$}{:?} backward", "", next_pos, level*2);
-                        board[next_pos.0][next_pos.1] = 0;
-                    }
-                }
-                return Err(anyhow!("can't resolv"))
-            } else{
-                break;
-            }
-        }
-        
-        Ok(())
-    }
-
-    fn fill(&mut self, pos: Cell, n: u8)-> Result<()>{
-        self.data[pos.0][pos.1] = n;
-        self.state.fill(pos, n)
-    }
-    fn get(&mut self, pos: Cell) -> u8{
-        self.data[pos.0][pos.1]
-    }
-    fn erase(&mut self, _pos: Cell)-> Result<()>{
-        Ok(())
-    }
-    fn init_state(&mut self) -> Result<()>{
-        for i in 0..9{
-            for j in 0..9{
-                let n = self.data[i][j];
-                if n != 0{
-                    if let Err(err) = self.state.fill((i,j), n) {
-                        return Err(err);
-                    }
-                }
-            }
-        }
-        Ok(())
+        String::from_utf8(bufwriter.into_inner().unwrap()).unwrap()
     }
 }
+
+impl Default for SudokuState{
+    fn default() -> Self{
+        fn new_filled_state()-> FilledState{
+            // 0 总是默认填充, 值为1
+            let mut tpl = Bitmap::<10>::mask(1);
+            // let tpl = tpl.as_value();
+            // let bits = Bitmap::<10>::from_value(*tpl),
+            // bitmap has copy trait
+            [tpl;9]
+        }
+
+        // 1~9默认都是侯选, 0 永远不是侯选
+        let mut candidates_tpl = Bitmap::<10>::mask(10);
+        candidates_tpl.set(0, false);
+        SudokuState{
+            blank_counts: 81,
+            rows_filled_state: new_filled_state(),
+            cols_filled_state: new_filled_state(),
+            grids_filled_state: new_filled_state(),
+            candidates: [[candidates_tpl;9];9],
+        }
+    }
+}
+impl ToString for SudokuState{
+    fn to_string(&self) -> String{
+        let mut bufwriter = BufWriter::new(Vec::with_capacity((N*4 as usize).pow(2)));
+        bufwriter.write("candidates:\n".as_bytes()).unwrap();
+        for i in 0..9{
+            for j in 0..9{
+                let line = format!("({},{}): {:?}\n", i, j, self.get_candidates((i, j)));
+                bufwriter.write(line.as_bytes()).unwrap();
+            }
+        }
+        String::from_utf8(bufwriter.into_inner().unwrap()).unwrap()
+    }
+}
+
+impl SudokuState{
+    pub fn get_candidates(&self, cell: Cell)-> Vec<u8>{
+        get_bits(self.candidates[cell.0][cell.1])
+    }
+
+    fn fill(&mut self, pos: Cell, num: u8)-> Result<()>{
+        assert!(num > 0 && num < 10);
+
+        let (row,col) = pos;
+        assert!(row < 9 && col < 9);
+
+        let num = num as usize;
+
+        if self.rows_filled_state[row].set(num, true) {
+            return Err(anyhow!("conflict at row {}", row))
+        }
+
+        if self.cols_filled_state[col].set(num, true){
+            return Err(anyhow!("conflict at col {}", col))
+        }
+
+        let grid = (row / 3) * 3 +  (col / 3);
+        if self.grids_filled_state[grid].set(num, true){
+            return Err(anyhow!("conflict at grid {}", grid))
+        }
+
+        // remove candidates
+        self.candidates[row][col] = Bitmap::new();
+        // remove candidates for this cell
+        let mut cells = Vec::<Cell>::new();
+        for i in 0..9{
+            // 行
+            if i!=col{
+                cells.push((row,i));
+            }
+            // 列
+            if i!=row{
+                cells.push((i,col));
+            }
+            // 宫格
+            let gr = row - row%3 + i / 3 ;
+            let gc = col - col % 3 + i % 3;
+            if (gr!=row) && (gc!=col){
+                cells.push((gr,gc));
+            }
+        }
+        for cell in cells{
+            let mut cans = &mut self.candidates[cell.0][cell.1];
+            // true 改成 false 时触发冲突检查
+            if cans.set(num, false){
+                // 如果清空侯选，则表示冲突出现
+                if cans.is_empty(){
+                    return Err(anyhow!("conflict cause by filling {:?} with {}", pos, num))
+                }
+            }
+        }
+        self.blank_counts -= 1;
+        //println!("fill {:?}, {} Ok. left: {}", pos, num, self.blank_counts);
+        Ok(())
+    }
+
+    fn find_empty_pos_with_less_candidates(&self)-> Option<Cell>{
+        let mut cell = (0,0);
+        let mut min_cans_len = 10;
+
+        for row in 0..N {
+            for col in 0..N {
+                let can = self.candidates[row][col];
+                let can_len = can.len();
+                if can_len>0 && can_len < min_cans_len {
+                    min_cans_len = can_len;
+                    cell = (row, col);
+                }
+                if min_cans_len <= 2{
+                    return Some(cell);
+                }
+            }
+        }
+        if min_cans_len < 10{
+            return Some(cell);
+        }
+        None
+    }
+    
+    /// 找到某一行、列、宫格中，有唯一可填数值的单元, 输出需要去重
+    fn find_only_one_candidates(&self) -> Vec<(Cell, u8)> {
+        let mut result :Vec<(Cell, u8)> = Vec::new();
+        let result_ref = &mut result;
+        let mut push_to_result = move |cell: Cell, n:u8| {
+            if let None = result_ref.into_iter().position(|i|i.0.0 == cell.0 && i.0.1 == cell.1 && i.1 == n) {
+                result_ref.push((cell, n));
+            }
+        };
+
+        #[inline(always)]
+        fn to_row_cell(grp: usize, unit:usize)->Cell{(grp,unit)}
+
+        #[inline(always)]
+        fn to_col_cell(grp: usize, unit: usize)-> Cell{(unit,grp)}
+
+        #[inline(always)]
+        fn to_grid_cell(grp: usize, unit: usize)-> Cell{
+            let lt :Cell = (grp / 3 * 3, grp % 3 * 3);
+            let gr = lt.0 + unit / 3 ;
+            let gc = lt.1 + unit % 3;
+            (gr,gc)}
+
+        let mut only_one_candidate_count = 0;
+        for row in 0..9{
+            for col in 0..9{
+                let can = self.candidates[row][col];
+                if can.len() == 1{
+                    only_one_candidate_count += 1;
+                    push_to_result((row, col), can.first_index().unwrap() as u8);
+                }
+            }
+        }
+
+        if only_one_candidate_count > 0 {
+            return result;
+        }
+
+        // 检查每一组(行、列、宫格) 的所有单元格(cell) 是否只有一个单元格具有唯一侯选
+        // 共9组
+        for grp in 0..9{
+            // 计数器，对应0~9, 0永远计数为0
+            let mut row_counter = [0;10];
+            let mut row_last_cell = [(0,0);10];
+            let mut col_counter = [0;10];
+            let mut col_last_cell = [(0,0);10];
+            let mut grid_counter = [0;10];
+            let mut grid_last_cell = [(0,0);10];
+            // 检查组中每个单元格, 共9格
+            for unit in 0..9{
+                // 行统计
+                let (row, col) = to_row_cell(grp, unit);
+                let cans = self.candidates[row][col];
+                // 每个单元格计数
+                for num in 1..=9{
+                    if cans.get(num){
+                        row_counter[num] += 1;
+                        row_last_cell[num] = (row, col);
+                    }
+                }
+
+                // 列统计
+                let (row, col) = to_col_cell(grp, unit);
+                let cans = self.candidates[row][col];
+                // 每个单元格计数
+                for num in 1..=9{
+                    if cans.get(num){
+                        col_counter[num] += 1;
+                        col_last_cell[num] = (row, col);
+                    }
+                }
+
+                // 宫格统计
+                let (row, col) = to_grid_cell(grp, unit);
+                let cans = self.candidates[row][col];
+                // 每个单元格计数
+                for num in 1..=9{
+                    if cans.get(num){
+                        grid_counter[num] += 1;
+                        grid_last_cell[num] = (row, col);
+                    }
+                }
+
+            }
+            for num in 1..=9{
+                if row_counter[num] == 1{
+                    push_to_result(row_last_cell[num], num as u8);
+                }
+                // if col_counter[num] == 1{
+                //     push_to_result(col_last_cell[num], num as u8);
+                // }
+                // if grid_counter[num] == 1{
+                //     push_to_result(grid_last_cell[num], num as u8);
+                // }
+            }
+        }
+
+        result
+    }
+
+    /// 某个宫格内一行中某两个单元, 如果其共同侯选N 在宫格内其他行都不存在，则可以断定该行其他单元(非宫格内的)，不可能填入N
+    /// 列也相同
+    /// 找到宫格内这种直线组合
+    fn find_line_combose_in_grid(&self, grid_id: usize) -> Vec<(Cell, Cell, u8)>{
+        let mut result : Vec<(Cell,Cell,u8)> = Vec::new();
+
+        // grid lefttop cell
+        let lt :Cell = (grid_id / 3 * 3, grid_id % 3 * 3);
+
+        // all combose
+        const ALL_COMB: &[(Cell,Cell)] = &[
+            // 行
+            ((0,0), (0,1)),
+            ((0,0), (0,2)),
+            ((0,1), (0,2)),
+
+            ((1,0), (1,1)),
+            ((1,0), (1,2)),
+            ((1,1), (1,2)),
+
+            ((2,0), (2,1)),
+            ((2,0), (2,2)),
+            ((2,1), (2,2)),
+
+            // 列
+            ((0,0), (1,0)),
+            ((0,0), (2,0)),
+            ((1,0), (2,0)),
+ 
+            ((0,1), (1,1)),
+            ((0,1), (2,1)),
+            ((1,1), (2,1)),
+ 
+            ((0,2), (1,2)),
+            ((0,2), (2,2)),
+            ((1,2), (2,2)),
+        ];
+
+        for (p1, p2) in ALL_COMB{
+            // cell1
+            let cell1 :Cell = (p1.0 + lt.0, p1.1 + lt.1);  
+            // cell2
+            let cell2 :Cell = (p2.0 + lt.0, p2.1 + lt.1);  
+            let cell1_can = self.candidates[cell1.0][cell1.1] ; 
+            let cell2_can = self.candidates[cell2.0][cell2.1];
+            if cell1_can.is_empty() || cell2_can.is_empty(){
+                continue;
+            }
+            //println!("combose: {:?} {:?}", c1, c2);
+
+            // combose common candidates bitmap
+            // 共同的侯选
+            let common = cell1_can & cell2_can; 
+            if common.is_empty(){
+                continue;
+            }
+
+            // 每个共同候选，对比相邻行、列
+            for num in get_bits(common){
+                let mut founded = true;
+                // 对比相邻的行列
+                for row in 0..3{
+                    if p1.0 == p2.0 && row == p1.0{
+                        // 如果是行组合，跳过当前行
+                        continue;
+                    }
+                    for col in 0..3{
+                        if p1.1 == p2.1 && col == p1.1{
+                            // 如果是列组合，跳过当前列
+                            continue;
+                        }
+                        let this_cans = self.candidates[lt.0+row][lt.1+col];
+                        if this_cans.get(num as usize){
+                            founded = false;
+                            break;
+                        }
+                    }
+                }
+
+                if founded{
+                    result.push((cell1, cell2, num));
+                }
+            }
+        }
+        result
+    }
+
+    /// 消除一个侯选，如果该侯选被成功消除，返回Ok(true), 否则返回Ok(false)
+    /// 当出现冲突时抛出错误
+    fn candidates_eliminate(&mut self, cell: Cell, n: u8) -> Result<bool>{
+        //println!("eliminate {} in {:?}. {:?}", n, cell, self.get_candidates(cell));
+        let old = self.candidates[cell.0][cell.1].set(n as usize, false);
+        if old == true && self.candidates[cell.0][cell.1].is_empty(){
+            //println!("old {} {:?}", old, self.get_candidates(cell));
+            // 如果由 true 改为 false, 并且侯选被清空, 则该单元格无法填充, 前置步骤有错误导致的冲突
+            return Err(anyhow!("found conflict when eliminate"));
+        }
+        Ok(old)
+    }
+
+    /// 直线消除
+    /// 当宫格内某行或列的共同candidates， 不在同宫格其他行或列里, 则对应的整行或整列非本宫格,应消除这些candidates
+    /// 比如 (0,1) (0,2) 共同candidates 是 [2,3], 且在 (1,0) (1,1) (1,2) (2,0) (2,1) (2, 2)中都没有2,3. 则应该消除 (0,p) p=3,4,5,6,7,9的candidates中的[2,3]
+    /// 返回消除的数量
+    fn line_candidates_eliminate(&mut self) -> Result<usize>{
+        fn eliminate_by_grid(state: &mut SudokuState, id: usize)->Result<usize>{
+            let mut counter = 0;
+            for (cell1, cell2, n) in state.find_line_combose_in_grid(id){
+                //println!("line combose in grid-{}: {:?}-{:?} {}", id, cell1, cell2, n);
+                if cell1.0 == cell2.0{
+                    // 行消除, 除了本宫格
+                    for icol in 0..9{
+                        if icol / 3 == cell1.1/3{
+                            continue;
+                        }
+                        if state.candidates_eliminate((cell1.0, icol), n)?{
+                            counter += 1;
+                        }
+                        
+                    }
+
+                }else if cell1.1==cell2.1{
+                    // 列消除, 除了本宫格
+                    for row in 0..9{
+                        if row / 3 == cell1.0/3{
+                            continue;
+                        }
+                            //println!("grid_line_combose eliminate ({},{})", row, cell1.1);
+                        if state.candidates_eliminate((row, cell1.1), n)? {
+                            counter += 1;
+                        }
+                    }
+                }
+            }
+            Ok(counter)
+        }
+
+        let mut counter = 0;
+        for id in 0..9{
+            counter += eliminate_by_grid(self, id)?;
+        }
+        Ok(counter)
+    }
+
+}
+
 
 #[cfg(test)]
 mod test{
@@ -605,37 +591,8 @@ mod test{
 
     #[ignore]
     #[test]
-    fn test_bitmap(){
-        //let mut b = Bitmap::<10>::mask(10);
-        let mut b = Bitmap::<10>::new();
-        b.set(2, true);
-        b.set(7, true);
-        println!("1: {}", b.get(1));
-        println!("2: {}", b.get(2));
-        println!("7: {}", b.get(7));
-
-        println!("{}", b.next_index(0).unwrap());
-    }
-
-    #[ignore]
-    #[test]
-    fn test_suduku_state() {
-        let mut state = SudukuState::default();
-        println!("state row0 with digit 9: {}", state.rows_filled_state[0].get(9));
-        println!("state col8 with digit 0: {}", state.cols_filled_state[8].get(0));
-        state.fill((1,1), 3); // same row
-        state.fill((1,2), 4);
-        state.fill((1,3), 5);
-        state.fill((3,5), 7); // same column
-        state.fill((4,5), 8);
-        state.fill((2,4), 9); // same grid
-        assert_eq!(vec![1,2, 6],state.get_candidates((1,5)));
-    }
-
-    #[ignore]
-    #[test]
     fn test_load(){
-        let data: Vec<u8> = vec![
+        let mut data: [u8;N*N] = [
         9,6,0, 0,3,0,  0,0,0,
         0,0,0, 8,0,0,  0,5,0,
         0,7,0, 0,0,0,  0,0,0,
@@ -647,21 +604,21 @@ mod test{
         0,0,0, 5,0,0,  0,8,7,
         0,0,0, 0,9,6,  0,0,0,
         0,0,0, 0,0,0,  0,0,0,
-        ].into_iter().map(|i|i+b'0').collect();
+        ];
 
+        for cell in data.iter_mut(){
+            *cell = *cell + b'0';
+        }
         println!("{:?}", data);
 
         let reader = BufReader::new(data.as_slice());
-        let mut suduku = Suduku::load_from(reader).unwrap();
-        println!("suduku: {:?}", suduku.to_string().unwrap());
-
-        // let result = suduku.resolv();
-        // println!("resolved? {:?}\n", result);
-        // println!("suduku: {:?}", suduku.to_string().unwrap());
+        let mut sudoku = Sudoku::load(reader).unwrap();
+        println!("sudoku:\n{}", sudoku.to_string());
     }
 
+    #[ignore]
     #[test]
-    fn test_resolv(){
+    fn test_load_str(){
         let data = r#"
         960 030 000
         000 800 050
@@ -678,128 +635,75 @@ mod test{
         println!("{:?}", data);
 
         let reader = BufReader::new(data.as_bytes());
-        let mut suduku = Suduku::load_from(reader).unwrap();
-        println!("suduku:\n{}", suduku.to_string().unwrap());
+        let mut sudoku = Sudoku::load(reader).unwrap();
+        println!("sudoku:\n{}", sudoku.to_string());
+    }
 
-        // let result = suduku.init_state();
-        // println!("result: {:?}", result);
-        // // for i in 0..9{
-        // //     for j in 0..9{
-        // //         println!("candidates for {:?}: {:?}", (i,j) as Cell ,suduku.state.get_candidates((i, j)));
-        // //     }
-        // // }
-        // let result = suduku.state.find_only_one_candidates();
-        // println!("result: {:?}", result);
-        // for (cell, num) in &result{
-        //     let result = suduku.fill(*cell, *num);
-        //     println!("fill result: {:?}", result);
-        // }
+    #[ignore]
+    #[test]
+    fn test_sudoku_state() {
+        let mut state = SudokuState::default();
+        println!("state row0 with digit 9: {}", state.rows_filled_state[0].get(9));
+        println!("state col8 with digit 0: {}", state.cols_filled_state[8].get(0));
+        state.fill((1,1), 3); // same row
+        state.fill((1,2), 4);
+        state.fill((1,3), 5);
+        state.fill((3,5), 7); // same column
+        state.fill((4,5), 8);
+        state.fill((2,4), 9); // same grid
+        assert_eq!(vec![1,2,6],state.get_candidates((1,5)));
 
-        // println!("suduku:\n{}", suduku.to_string().unwrap());
-        // // for i in 0..9{
-        // //     for j in 0..9{
-        // //         println!("candidates for {:?}: {:?}", (i,j) as Cell ,suduku.state.get_candidates((i, j)));
-        // //     }
-        // // }
+        for row in 0..9{
+            for col in 0..9{
+                case_sudoku_state_fill((row, col), 1);
+            }
+        }
+    }
 
-        // // let result = suduku.state.find_only_one_candidates();
-        // // println!("result: {:?}", result);
-        // // for (cell, num) in &result{
-        // //     let result = suduku.fill(*cell, *num);
-        // //     println!("fill result: {:?}", result);
-        // // }
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
+    fn case_sudoku_state_fill(pos: Cell, num: u8) {
+        let mut state = SudokuState::default();
+        state.fill(pos, num);
+        for col in 0..9{
+            assert_eq!(state.candidates[pos.0][col].get(num as usize), false);
+        }
+        for row in 0..9{
+            assert_eq!(state.candidates[row][pos.1].get(num as usize), false);
+        }
+        let lt = (pos.0 - pos.0 % 3, pos.1 - pos.1 %3);
+        for r_off in 0..3{
+            for c_off in 0..3{
+                let row = lt.0 + r_off;
+                let col = lt.1 + c_off;
+                assert_eq!(state.candidates[row][pos.1].get(num as usize), false);
+            }
+        }
+    }
 
-        // // let result = suduku.state.find_only_one_candidates();
-        // // println!("result: {:?}", result);
-        // // for (cell, num) in &result{
-        // //     let result = suduku.fill(*cell, *num);
-        // //     println!("fill result: {:?}", result);
-        // // }
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
+    // #[ignore]
+    #[test]
+    fn test_resolv(){
+        let data: [u8;N*N] = [
+        9,6,0, 0,3,0, 0,0,0,
+        0,0,0, 8,0,0, 0,5,0,
+        0,7,0, 0,0,0, 0,0,0,
 
-        // // let result = suduku.state.find_only_one_candidates();
-        // // println!("result: {:?}", result);
-        // // for (cell, num) in &result{
-        // //     let result = suduku.fill(*cell, *num);
-        // //     println!("fill result: {:?}", result);
-        // // }
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
+        4,0,5, 0,0,0, 9,0,0,
+        2,0,0, 0,0,0, 3,0,0,
+        0,0,0, 7,0,0, 0,0,0,
 
-        // // suduku.state.grid_line_candidates_eliminate();
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
+        0,0,0, 5,0,0, 0,8,7,
+        0,0,0, 0,9,6, 0,0,0,
+        0,0,0, 0,0,0, 0,0,0,
+        ];
+        let mut sudoku = Sudoku::from_bytes(&data[..]);
+        println!("sudoku:\n{}", sudoku.to_string());
+        println!("left:{}", sudoku.state.blank_counts);
+        let result = sudoku.resolv();
+        println!("result: {:?}", result);
 
-        // // let result = suduku.state.find_only_one_candidates();
-        // // println!("result: {:?}", result);
-        // // for (cell, num) in &result{
-        // //     let result = suduku.fill(*cell, *num);
-        // //     println!("fill result: {:?}", result);
-        // // }
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
+        println!("sudoku:\n{}", sudoku.to_string());
+        println!("sudoku state:\n{}", sudoku.state.to_string());
 
-        // // let result = suduku.state.find_only_one_candidates();
-        // // println!("result: {:?}", result);
-        // // for (cell, num) in &result{
-        // //     let result = suduku.fill(*cell, *num);
-        // //     println!("fill result: {:?}", result);
-        // // }
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
-
-        // // let result = suduku.state.find_only_one_candidates();
-        // // println!("result: {:?}", result);
-        // // for (cell, num) in &result{
-        // //     let result = suduku.fill(*cell, *num);
-        // //     println!("fill result: {:?}", result);
-        // // }
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
-
-        // // let result = suduku.state.find_only_one_candidates();
-        // // println!("result: {:?}", result);
-        // // for (cell, num) in &result{
-        // //     let result = suduku.fill(*cell, *num);
-        // //     println!("fill result: {:?}", result);
-        // // }
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
-
-        // // let result = suduku.state.find_only_one_candidates();
-        // // println!("result: {:?}", result);
-        // // for (cell, num) in &result{
-        // //     let result = suduku.fill(*cell, *num);
-        // //     println!("fill result: {:?}", result);
-        // // }
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
-
-        // // suduku.state.grid_line_candidates_eliminate();
-        // // println!("suduku:\n{}", suduku.to_string().unwrap());
-
-        // loop{
-        // loop {
-        //     let result = suduku.state.find_only_one_candidates();
-        //     println!("result: {:?}", result);
-        //     for (cell, num) in &result{
-        //         let result = suduku.fill(*cell, *num);
-        //         println!("fill result: {:?}", result);
-        //     }
-        //     println!("suduku:\n{}", suduku.to_string().unwrap());
-        //     if result.len() == 0{
-        //         break;
-        //     }
-        // }
-
-        // let n = suduku.state.grid_line_candidates_eliminate();
-        // println!("suduku:\n{}", suduku.to_string().unwrap());
-        //     if n == 0{
-        //         break;
-        //     }
-        // }
-        // for i in 0..9{
-        //     for j in 0..9{
-        //         println!("candidates for {:?}: {:?}", (i,j) as Cell ,suduku.state.get_candidates((i, j)));
-        //     }
-        // }
-
-        let result = suduku.resolv();
-        println!("resolved? {:?}\n", result);
-        println!("suduku:\n{}", suduku.to_string().unwrap());
     }
 }
+
