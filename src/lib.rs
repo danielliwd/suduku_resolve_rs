@@ -11,13 +11,143 @@ use bitmaps::Bitmap;
 #[allow(unused_imports)]
 use log::{info, trace};
 
-type Board = [[u8;9];9];
-type Cell = (usize,usize);
+const N: usize=9;
+type Board = [[u8;N];N];
+type Cell = (usize, usize);
+
+// 每个单元格关联的单元格数
+const RN: usize = N + N / 3 * 4 - 1;
+/// 关联矩阵。 某个单元格所在行，列，宫格的相关联单元格。
+type RelatedMatrix = [[[Cell;RN];N];N];
+
+const fn create_related_matrix()-> RelatedMatrix{
+    let mut matrix = [[[(0,0);RN];N];N];
+    const fn matrix_cell(pos: Cell)-> [Cell;RN]{
+        let mut cells = [(0,0);RN];
+        let mut id = 0;
+        let mut c = 0;
+        while c < N {
+            // 行
+            let (row,col) = (pos.0, c);
+            if c!=pos.1{
+                cells[id] = (row,col);
+                id +=1;
+            }
+            // 列
+            let (row, col) = (c, pos.1);
+            if c!=pos.0{
+                cells[id] = (row,col);
+                id +=1;
+            }
+            let (row,col) = (pos.0 - pos.0 % 3 + c / 3, pos.1 - pos.1 % 3 + c % 3);
+            if row!=pos.0 && col != pos.1{
+                cells[id] = (row,col);
+                id +=1;
+            }
+            // 宫格
+            c+=1;
+        }
+        cells
+    }
+    let mut row = 0;
+    while row<N{
+        let mut col = 0;
+        while col< N {
+            matrix[row][col] = matrix_cell((row,col));
+            col+=1;
+        }
+        row += 1;
+    }
+    matrix
+}
+
+// #[allow(long_running_const_eval)]
+const RELATED_MATRIX : RelatedMatrix = create_related_matrix();
+
+
+type Combose = (Cell, Cell);
+type Compare = [Cell;6];
+type GridLineComboseAndCompare = [(Combose, Compare);18];
+
+#[allow(long_running_const_eval)]
+const GRID_LINE_COMBOSE_AND_COMPARE: GridLineComboseAndCompare = create_grid_line_combose_and_compare();
+const fn create_grid_line_combose_and_compare()-> GridLineComboseAndCompare{
+    //let mut comb = [([(0,0);2],[(0,0);6]);18];
+    let mut comb: GridLineComboseAndCompare = [
+        // 行
+        (((0,0), (0,1)),[(0,0);6]),
+        (((0,0), (0,2)),[(0,0);6]), 
+        (((0,1), (0,2)),[(0,0);6]),
+
+        (((1,0), (1,1)),[(0,0);6]),
+        (((1,0), (1,2)),[(0,0);6]),
+        (((1,1), (1,2)),[(0,0);6]),
+
+        (((2,0), (2,1)),[(0,0);6]),
+        (((2,0), (2,2)),[(0,0);6]),
+        (((2,1), (2,2)),[(0,0);6]),
+
+        // 列
+        (((0,0), (1,0)),[(0,0);6]),
+        (((0,0), (2,0)),[(0,0);6]),
+        (((1,0), (2,0)),[(0,0);6]),
+
+        (((0,1), (1,1)),[(0,0);6]),
+        (((0,1), (2,1)),[(0,0);6]),
+        (((1,1), (2,1)),[(0,0);6]),
+
+        (((0,2), (1,2)),[(0,0);6]),
+        (((0,2), (2,2)),[(0,0);6]),
+        (((1,2), (2,2)),[(0,0);6]),
+    ];
+    const fn comb_compare_with(towcell: Combose)-> Compare{
+        let mut comp : Compare = [(0,0);6];
+        let mut id = 0;
+        let (cell1, cell2) = towcell;
+        if cell1.0 == cell2.0 {
+            // 行组合
+            let mut row = 0;
+            while row<3{
+                if row == cell1.0 {
+                    row+=1;
+                    continue;
+                }
+                comp[id] = (row, 0);
+                comp[id+1] = (row, 1);
+                comp[id+2] = (row, 2);
+                id += 3;
+                row+=1;
+            }
+        } else if cell1.1 == cell2.1 {
+            // 列组合
+            let mut col = 0;
+            while col <3{
+                if col == cell1.1 {
+                    col+=1;
+                    continue;
+                }
+                comp[id] = (0, col);
+                comp[id+1] = (1, col);
+                comp[id+2] = (2, col);
+                id += 3;
+                col+=1;
+            }
+        }
+        comp
+    }
+    let mut c = 0;
+    while c < 18{
+        comb[c].1 = comb_compare_with(comb[c].0);
+        c+=1;
+    }
+    comb
+}
+
 
 // get bits in bitmap
 #[inline(always)]
 fn get_bits(b: Bitmap<10>) -> Vec<u8>{
-    let mut bits = Vec::with_capacity(9);
+    let mut bits = Vec::with_capacity(N);
     let mut from_idx = 0;
     loop{
         if let Some(index) = b.next_index(from_idx){
@@ -33,8 +163,8 @@ fn get_bits(b: Bitmap<10>) -> Vec<u8>{
 
 /// 行、列的填充状态, 某数字被填充，则 get(n) == true
 /// bitmap可以进行位运算, 比较方便
-type FilledState = [Bitmap<10>;9];
-type Candidates = [[Bitmap<10>;9];9];
+type FilledState = [Bitmap<10>;N];
+type Candidates = [[Bitmap<10>;N];N];
 
 #[derive(Clone, Copy)]
 pub struct SudokuState{
@@ -61,7 +191,6 @@ pub struct Sudoku{
 }
 
 
-const N: usize=9;
 impl Sudoku {
     fn create()-> Sudoku{
         Sudoku{
@@ -82,11 +211,11 @@ impl Sudoku {
                 sudoku.board[row][col] = *num;
             }
             col+=1;
-            if col>=9{
+            if col>=N{
                 row+=1;
                 col=0;
             }
-            if row >= 9 {
+            if row >= N {
                 break;
             }
         }
@@ -118,8 +247,8 @@ impl Sudoku {
     }
 
     fn init_state(&mut self) -> Result<()>{
-        for i in 0..9{
-            for j in 0..9{
+        for i in 0..N{
+            for j in 0..N{
                 let n = self.board[i][j];
                 if n != 0{
                     if let Err(err) = self.state.fill((i,j), n) {
@@ -199,8 +328,8 @@ impl Sudoku {
 impl ToString for Sudoku{
     fn to_string(&self) -> String{
         let mut bufwriter = BufWriter::new(Vec::with_capacity((N*4 as usize).pow(2)));
-        for i in 0..9{
-            for j in 0..9{
+        for i in 0..N{
+            for j in 0..N{
                 let n = self.board[i][j];
                 bufwriter.write(&[n + b'0', b' ']).unwrap();
                 if j%3==2{
@@ -225,18 +354,18 @@ impl Default for SudokuState{
             // let tpl = tpl.as_value();
             // let bits = Bitmap::<10>::from_value(*tpl),
             // bitmap has copy trait
-            [tpl;9]
+            [tpl;N]
         }
 
         // 1~9默认都是侯选, 0 永远不是侯选
         let mut candidates_tpl = Bitmap::<10>::mask(10);
         candidates_tpl.set(0, false);
         SudokuState{
-            blank_counts: 81,
+            blank_counts: (N*N) as u8,
             rows_filled_state: new_filled_state(),
             cols_filled_state: new_filled_state(),
             grids_filled_state: new_filled_state(),
-            candidates: [[candidates_tpl;9];9],
+            candidates: [[candidates_tpl;N];N],
         }
     }
 }
@@ -244,8 +373,8 @@ impl ToString for SudokuState{
     fn to_string(&self) -> String{
         let mut bufwriter = BufWriter::new(Vec::with_capacity((N*4 as usize).pow(2)));
         bufwriter.write("candidates:\n".as_bytes()).unwrap();
-        for i in 0..9{
-            for j in 0..9{
+        for i in 0..N{
+            for j in 0..N{
                 let line = format!("({},{}): {:?}\n", i, j, self.get_candidates((i, j)));
                 bufwriter.write(line.as_bytes()).unwrap();
             }
@@ -263,7 +392,7 @@ impl SudokuState{
         assert!(num > 0 && num < 10);
 
         let (row,col) = pos;
-        assert!(row < 9 && col < 9);
+        assert!(row < N && col < N);
 
         let num = num as usize;
 
@@ -283,24 +412,7 @@ impl SudokuState{
         // remove candidates
         self.candidates[row][col] = Bitmap::new();
         // remove candidates for this cell
-        let mut cells = Vec::<Cell>::new();
-        for i in 0..9{
-            // 行
-            if i!=col{
-                cells.push((row,i));
-            }
-            // 列
-            if i!=row{
-                cells.push((i,col));
-            }
-            // 宫格
-            let gr = row - row%3 + i / 3 ;
-            let gc = col - col % 3 + i % 3;
-            if (gr!=row) && (gc!=col){
-                cells.push((gr,gc));
-            }
-        }
-        for cell in cells{
+        for cell in RELATED_MATRIX[row][col]{
             let mut cans = &mut self.candidates[cell.0][cell.1];
             // true 改成 false 时触发冲突检查
             if cans.set(num, false){
@@ -362,8 +474,8 @@ impl SudokuState{
             (gr,gc)}
 
         let mut only_one_candidate_count = 0;
-        for row in 0..9{
-            for col in 0..9{
+        for row in 0..N{
+            for col in 0..N{
                 let can = self.candidates[row][col];
                 if can.len() == 1{
                     only_one_candidate_count += 1;
@@ -378,7 +490,7 @@ impl SudokuState{
 
         // 检查每一组(行、列、宫格) 的所有单元格(cell) 是否只有一个单元格具有唯一侯选
         // 共9组
-        for grp in 0..9{
+        for grp in 0..N{
             // 计数器，对应0~9, 0永远计数为0
             let mut row_counter = [0;10];
             let mut row_last_cell = [(0,0);10];
@@ -387,7 +499,7 @@ impl SudokuState{
             let mut grid_counter = [0;10];
             let mut grid_last_cell = [(0,0);10];
             // 检查组中每个单元格, 共9格
-            for unit in 0..9{
+            for unit in 0..N{
                 // 行统计
                 let (row, col) = to_row_cell(grp, unit);
                 let cans = self.candidates[row][col];
@@ -426,12 +538,12 @@ impl SudokuState{
                 if row_counter[num] == 1{
                     push_to_result(row_last_cell[num], num as u8);
                 }
-                // if col_counter[num] == 1{
-                //     push_to_result(col_last_cell[num], num as u8);
-                // }
-                // if grid_counter[num] == 1{
-                //     push_to_result(grid_last_cell[num], num as u8);
-                // }
+                if col_counter[num] == 1{
+                    push_to_result(col_last_cell[num], num as u8);
+                }
+                if grid_counter[num] == 1{
+                    push_to_result(grid_last_cell[num], num as u8);
+                }
             }
         }
 
@@ -447,36 +559,7 @@ impl SudokuState{
         // grid lefttop cell
         let lt :Cell = (grid_id / 3 * 3, grid_id % 3 * 3);
 
-        // all combose
-        const ALL_COMB: &[(Cell,Cell)] = &[
-            // 行
-            ((0,0), (0,1)),
-            ((0,0), (0,2)),
-            ((0,1), (0,2)),
-
-            ((1,0), (1,1)),
-            ((1,0), (1,2)),
-            ((1,1), (1,2)),
-
-            ((2,0), (2,1)),
-            ((2,0), (2,2)),
-            ((2,1), (2,2)),
-
-            // 列
-            ((0,0), (1,0)),
-            ((0,0), (2,0)),
-            ((1,0), (2,0)),
- 
-            ((0,1), (1,1)),
-            ((0,1), (2,1)),
-            ((1,1), (2,1)),
- 
-            ((0,2), (1,2)),
-            ((0,2), (2,2)),
-            ((1,2), (2,2)),
-        ];
-
-        for (p1, p2) in ALL_COMB{
+        for ((p1, p2),comp) in GRID_LINE_COMBOSE_AND_COMPARE{
             // cell1
             let cell1 :Cell = (p1.0 + lt.0, p1.1 + lt.1);  
             // cell2
@@ -499,21 +582,11 @@ impl SudokuState{
             for num in get_bits(common){
                 let mut founded = true;
                 // 对比相邻的行列
-                for row in 0..3{
-                    if p1.0 == p2.0 && row == p1.0{
-                        // 如果是行组合，跳过当前行
-                        continue;
-                    }
-                    for col in 0..3{
-                        if p1.1 == p2.1 && col == p1.1{
-                            // 如果是列组合，跳过当前列
-                            continue;
-                        }
-                        let this_cans = self.candidates[lt.0+row][lt.1+col];
-                        if this_cans.get(num as usize){
-                            founded = false;
-                            break;
-                        }
+                for cell in comp{
+                    let this_cans = self.candidates[cell.0+lt.0][cell.1+lt.1];
+                    if this_cans.get(num as usize){
+                        founded = false;
+                        break;
                     }
                 }
 
@@ -549,7 +622,7 @@ impl SudokuState{
                 //println!("line combose in grid-{}: {:?}-{:?} {}", id, cell1, cell2, n);
                 if cell1.0 == cell2.0{
                     // 行消除, 除了本宫格
-                    for icol in 0..9{
+                    for icol in 0..N{
                         if icol / 3 == cell1.1/3{
                             continue;
                         }
@@ -561,7 +634,7 @@ impl SudokuState{
 
                 }else if cell1.1==cell2.1{
                     // 列消除, 除了本宫格
-                    for row in 0..9{
+                    for row in 0..N{
                         if row / 3 == cell1.0/3{
                             continue;
                         }
@@ -576,7 +649,7 @@ impl SudokuState{
         }
 
         let mut counter = 0;
-        for id in 0..9{
+        for id in 0..N{
             counter += eliminate_by_grid(self, id)?;
         }
         Ok(counter)
@@ -679,7 +752,7 @@ mod test{
         }
     }
 
-    // #[ignore]
+    #[ignore]
     #[test]
     fn test_resolv(){
         let data: [u8;N*N] = [
@@ -704,6 +777,13 @@ mod test{
         println!("sudoku:\n{}", sudoku.to_string());
         println!("sudoku state:\n{}", sudoku.state.to_string());
 
+    }
+
+    #[ignore]
+    #[test]
+    fn test_const(){
+        println!("{:?}", RELATED_MATRIX);
+        println!("{:?}", GRID_LINE_COMBOSE_AND_COMPARE);
     }
 }
 
